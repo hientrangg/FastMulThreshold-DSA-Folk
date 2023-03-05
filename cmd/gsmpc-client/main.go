@@ -33,9 +33,9 @@ import (
 	"github.com/anyswap/FastMulThreshold-DSA/crypto/sha3"
 	"github.com/anyswap/FastMulThreshold-DSA/ethdb"
 	"github.com/anyswap/FastMulThreshold-DSA/internal/common/hexutil"
-	"github.com/btcsuite/btcd/btcec"
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcutil"
+//	"github.com/btcsuite/btcd/btcec"
+//	"github.com/btcsuite/btcd/chaincfg"
+//	"github.com/btcsuite/btcutil"
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/accounts/keystore"
 	"github.com/ethereum/go-ethereum/common"
@@ -101,6 +101,24 @@ var (
 	predb             *ethdb.LDBDatabase
 	presignhashpairdb *ethdb.LDBDatabase
 )
+
+// Bytes2Hex returns the hexadecimal encoding of d.
+func Bytes2Hex(d []byte) string {
+	return hex.EncodeToString(d)
+}
+
+// ToHex returns the hex representation of b, prefixed with '0x'.
+// For empty slices, the return value is "0x0".
+//
+// Deprecated: use hexutil.Encode instead.
+func ToHex(b []byte) string {
+	hex := Bytes2Hex(b)
+	if len(hex) == 0 {
+		hex = "0"
+	}
+	return "0x" + hex
+}
+//----------------------------
 
 func main() {
 	switch *cmd {
@@ -178,12 +196,12 @@ func main() {
 			fmt.Printf("createContract failed. %v\n", err)
 			return
 		}
-	case "GETSMPCADDR":
-		err := getSmpcAddr()
-		if err != nil {
-			fmt.Printf("pubkey = %v, get smpc addr failed. %v\n", pubkey, err)
-			return
-		}
+	//case "GETSMPCADDR":
+	//	err := getSmpcAddr()
+	//	if err != nil {
+	//		fmt.Printf("pubkey = %v, get smpc addr failed. %v\n", pubkey, err)
+	//		return
+	//	}
 	default:
 		fmt.Printf("\nCMD('%v') not support\nSupport cmd: EnodeSig|SetGroup|REQSMPCADDR|ACCEPTREQADDR|ACCEPTLOCKOUT|SIGN|PRESIGNDATA|DELPRESIGNDATA|GETPRESIGNDATA|ACCEPTSIGN|RESHARE|ACCEPTRESHARE|CREATECONTRACT|GETSMPCADDR\n", *cmd)
 	}
@@ -312,7 +330,7 @@ func enodeSig() {
 	if err != nil {
 		panic(err)
 	}
-	fmt.Printf("\nenodeSig self = \n%s\n\n", enodeJSON.Enode+common.ToHex(sig))
+	fmt.Printf("\nenodeSig self = \n%s\n\n", enodeJSON.Enode+ToHex(sig))
 }
 
 // setGroup set group info
@@ -628,10 +646,10 @@ func acceptLockOut() {
 // sign Execute MPC sign 
 func sign() {
 	//if *msghash == "" {
-	//	*msghash = common.ToHex(crypto.Keccak256([]byte(*memo)))
+	//	*msghash = ToHex(crypto.Keccak256([]byte(*memo)))
 	//}
 	if len(hashs) == 0 {
-		hashs = append(hashs, common.ToHex(crypto.Keccak256([]byte(*memo))))
+		hashs = append(hashs, ToHex(crypto.Keccak256([]byte(*memo))))
 	}
 
 	if len(contexts) == 0 {
@@ -1067,7 +1085,7 @@ func acceptSign() {
 		var msgContext []string
 
 		if len(hashs) == 0 {
-			hashs = append(hashs, common.ToHex(crypto.Keccak256([]byte(*memo))))
+			hashs = append(hashs, ToHex(crypto.Keccak256([]byte(*memo))))
 		}
 
 		if len(contexts) == 0 {
@@ -1218,7 +1236,7 @@ func acceptReshare() {
 	}
 }
 
-// getSmpcAddr get smpc addr by pubkey
+/*// getSmpcAddr get smpc addr by pubkey
 func getSmpcAddr() error {
 	if pubkey == nil {
 		return fmt.Errorf("pubkey error")
@@ -1279,6 +1297,7 @@ func getSmpcAddr() error {
 	fmt.Printf("\ngetSmpcAddr result: %s\n\n", address)
 	return nil
 }
+*/
 
 func hexEncPubkey(h string) (ret [64]byte) {
 	b, err := hex.DecodeString(h)
@@ -1368,7 +1387,7 @@ func signTX(signer types.EIP155Signer, privatekey *ecdsa.PrivateKey, nonce uint6
 	if txerr != nil {
 		panic(txerr)
 	}
-	rawTX := common.ToHex(txdata)
+	rawTX := ToHex(txdata)
 	fmt.Printf("\nSignTx:\nChainId\t\t=%s\nGas\t\t=%d\nGasPrice\t=%s\nNonce\t\t=%d\nToAddr\t\t=%s\nHash\t\t=%s\nData\t\t=%s\n",
 		sigTx.ChainId(), sigTx.Gas(), sigTx.GasPrice(), sigTx.Nonce(), sigTx.To().String(), sigTx.Hash().Hex(), sigTx.Data())
 	fmt.Printf("RawTransaction = %+v\n", rawTX)
