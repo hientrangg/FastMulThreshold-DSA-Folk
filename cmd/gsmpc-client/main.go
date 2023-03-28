@@ -1,6 +1,6 @@
 /*
- *  Copyright (C) 2018-2019  Fusion Foundation Ltd. All rights reserved.
- *  Copyright (C) 2018-2019  hezhaojun@fusion.org huangweijun@fusion.org
+ *  Copyright (C) 2020-2021  AnySwap Ltd. All rights reserved.
+ *  Copyright (C) 2020-2021  hezhaojun@anyswap.exchange huangweijun@anyswap.exchange
  *
  *  This library is free software; you can redistribute it and/or
  *  modify it under the Apache License, Version 2.0.
@@ -14,6 +14,7 @@
  *
  */
 
+// Package main  Gsmpc-client main program 
 package main
 
 import (
@@ -28,6 +29,13 @@ import (
 	"strings"
 	"time"
 
+	"encoding/hex"
+	"github.com/anyswap/FastMulThreshold-DSA/crypto/sha3"
+	"github.com/anyswap/FastMulThreshold-DSA/ethdb"
+	"github.com/anyswap/FastMulThreshold-DSA/internal/common/hexutil"
+//	"github.com/btcsuite/btcd/btcec"
+//	"github.com/btcsuite/btcd/chaincfg"
+//	"github.com/btcsuite/btcutil"
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/accounts/keystore"
 	"github.com/ethereum/go-ethereum/common"
@@ -35,49 +43,82 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/onrik/ethrpc"
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcutil"
-	"encoding/hex"
-	"github.com/btcsuite/btcd/btcec"
+	"log"
+	"os"
+	"os/user"
+	"path/filepath"
+	"runtime"
+	"sync"
 )
 
 const (
+    	// KEYFILE keystore file
 	KEYFILE      = `{"version":3,"id":"16b5e31c-cd1a-4cdc-87a6-fc4164766698","address":"00c37841378920e2ba5151a5d1e074cf367586c4","crypto":{"ciphertext":"2070bf8491759f01b4f3f4d6d4b2e274f105be8dc01edd1ebce8d7d954eb64bd","cipherparams":{"iv":"03263465543e4631db50ecfc6b75a74f"},"cipher":"aes-128-ctr","kdf":"scrypt","kdfparams":{"dklen":32,"salt":"9c7b6430552524f0bc1b47bed69e34b0595bc29af4d12e65ec966b16af9c2cf6","n":8192,"r":8,"p":1},"mac":"44d1b7106c28711b06cda116205ee741cba90ab3df0776d59c246b876ded0e97"}}`
-	DCRM_TO_ADDR = `0x00000000000000000000000000000000000000dc`
-	CHAIN_ID     = 30400 //DCRM_walletService  ID
+	
+	// SmpcToAddr smpc tx to addr
+	SmpcToAddr = `0x00000000000000000000000000000000000000dc`
+
+	// CHID smpc wallet service ID
+	CHID     = 30400 //SMPC_walletService  ID
 )
 
 var (
-	keyfile  *string
-	passwd   *string
-	url      *string
-	cmd      *string
-	gid      *string
-	ts       *string
-	mode     *string
-	toAddr   *string
-	value    *string
-	coin     *string
-	fromAddr *string
-	memo     *string
-	accept   *string
-	key      *string
-	keyType  *string
-	pubkey   *string
-	msghash  *string
-	enode    *string
-	tsgid    *string
-	netcfg    *string
+	keyfile     *string
+	datadir     *string
+	logfilepath *string
+	loop        *string
+	n           *string
+	passwd      *string
+	passwdfile  *string
+	url         *string
+	cmd         *string
+	gid         *string
+	ts          *string
+	mode        *string
+	toAddr      *string
+	value       *string
+	coin        *string
+	fromAddr    *string
+	memo        *string
+	accept      *string
+	key         *string
+	keyType     *string
+	pubkey      *string
+	inputcode   *string
+	msghash     *string
+	enode       *string
+	tsgid       *string
+	netcfg      *string
 
-	enodesSig  arrayFlags
-	nodes      arrayFlags
-	hashs      arrayFlags
-	subgids      arrayFlags
-	contexts      arrayFlags
-	keyWrapper *keystore.Key
-	signer     types.EIP155Signer
-	client     *ethrpc.EthRPC
+	enodesSig         arrayFlags
+	nodes             arrayFlags
+	hashs             arrayFlags
+	subgids           arrayFlags
+	contexts          arrayFlags
+	keyWrapper        *keystore.Key
+	signer            types.EIP155Signer
+	client            *ethrpc.EthRPC
+	predb             *ethdb.LDBDatabase
+	presignhashpairdb *ethdb.LDBDatabase
 )
+
+// Bytes2Hex returns the hexadecimal encoding of d.
+func Bytes2Hex(d []byte) string {
+	return hex.EncodeToString(d)
+}
+
+// ToHex returns the hex representation of b, prefixed with '0x'.
+// For empty slices, the return value is "0x0".
+//
+// Deprecated: use hexutil.Encode instead.
+func ToHex(b []byte) string {
+	hex := Bytes2Hex(b)
+	if len(hex) == 0 {
+		hex = "0"
+	}
+	return "0x" + hex
+}
+//----------------------------
 
 func main() {
 	switch *cmd {
@@ -87,9 +128,9 @@ func main() {
 	case "SetGroup":
 		// get GID
 		setGroup()
-	case "REQDCRMADDR":
-		// req DCRM account
-		reqDcrmAddr()
+	case "REQSMPCADDR":
+		// req SMPC account
+		reqSmpcAddr()
 	case "ACCEPTREQADDR":
 		// req condominium account
 		acceptReqAddr()
@@ -99,11 +140,47 @@ func main() {
 		// approve condominium account lockout
 		acceptLockOut()
 	case "SIGN":
+		PrintSignResultToLocalFile()
 		// test sign
-		sign()
+		innerloop, err := strconv.ParseUint(*n, 0, 64)
+		if err != nil {
+			fmt.Printf("==========================test sign fail, --n param error, n = %v,err = %v=======================\n", *n, err)
+			return
+		}
+		outerloop, err := strconv.ParseUint(*loop, 0, 64)
+		if err != nil {
+			fmt.Printf("==========================test sign fail, --loop param error, n = %v,err = %v=======================\n", *loop, err)
+			return
+		}
+
+		var outwg sync.WaitGroup
+		for j := 0; j < int(outerloop); j++ {
+			outwg.Add(1)
+			go func() {
+				defer outwg.Done()
+				var wg sync.WaitGroup
+				for i := 0; i < int(innerloop); i++ {
+					wg.Add(1)
+					go func() {
+						defer wg.Done()
+						sign()
+					}()
+				}
+				wg.Wait()
+			}()
+
+			time.Sleep(time.Duration(3) * time.Second)
+		}
+		outwg.Wait()
 	case "PRESIGNDATA":
 		// test pre sign data
 		preGenSignData()
+	case "DELPRESIGNDATA":
+		// test pre sign data
+		delPreSignData()
+	case "GETPRESIGNDATA":
+		// test pre sign data
+		getPreSignData()
 	case "ACCEPTSIGN":
 		// approve condominium account sign
 		acceptSign()
@@ -117,22 +194,29 @@ func main() {
 		err := createContract()
 		if err != nil {
 			fmt.Printf("createContract failed. %v\n", err)
+			return
 		}
-	case "GETDCRMADDR":
-	    err := getDcrmAddr()
-	    if err != nil {
-			fmt.Printf("pubkey = %v, get mpc addr failed. %v\n", pubkey,err)
-	    }
+	//case "GETSMPCADDR":
+	//	err := getSmpcAddr()
+	//	if err != nil {
+	//		fmt.Printf("pubkey = %v, get smpc addr failed. %v\n", pubkey, err)
+	//		return
+	//	}
 	default:
-		fmt.Printf("\nCMD('%v') not support\nSupport cmd: EnodeSig|SetGroup|REQDCRMADDR|ACCEPTREQADDR|LOCKOUT|ACCEPTLOCKOUT|SIGN|PRESIGNDATA|ACCEPTSIGN|RESHARE|ACCEPTRESHARE|CREATECONTRACT|GETDCRMADDR\n", *cmd)
+		fmt.Printf("\nCMD('%v') not support\nSupport cmd: EnodeSig|SetGroup|REQSMPCADDR|ACCEPTREQADDR|ACCEPTLOCKOUT|SIGN|PRESIGNDATA|DELPRESIGNDATA|GETPRESIGNDATA|ACCEPTSIGN|RESHARE|ACCEPTRESHARE|CREATECONTRACT|GETSMPCADDR\n", *cmd)
 	}
 }
 
 func init() {
 	keyfile = flag.String("keystore", "", "Keystore file")
+	datadir = flag.String("datadir", "", "data path")
+	logfilepath = flag.String("logfilepath", "", "the path of log file")
+	loop = flag.String("loop", "10", "sign outer loop count")
+	n = flag.String("n", "100", "sign loop count")
 	passwd = flag.String("passwd", "111111", "Password")
+	passwdfile = flag.String("passwdfile", "", "Password file")
 	url = flag.String("url", "http://127.0.0.1:9011", "Set node RPC URL")
-	cmd = flag.String("cmd", "", "EnodeSig|SetGroup|REQDCRMADDR|ACCEPTREQADDR|LOCKOUT|ACCEPTLOCKOUT|SIGN|PRESIGNDATA|ACCEPTSIGN|RESHARE|ACCEPTRESHARE|CREATECONTRACT|GETDCRMADDR")
+	cmd = flag.String("cmd", "", "EnodeSig|SetGroup|REQSMPCADDR|ACCEPTREQADDR|ACCEPTLOCKOUT|SIGN|PRESIGNDATA|DELPRESIGNDATA|GETPRESIGNDATA|ACCEPTSIGN|RESHARE|ACCEPTRESHARE|CREATECONTRACT|GETSMPCADDR")
 	gid = flag.String("gid", "", "groupID")
 	ts = flag.String("ts", "2/3", "Threshold")
 	mode = flag.String("mode", "1", "Mode:private=1/managed=0")
@@ -144,8 +228,9 @@ func init() {
 	memo = flag.String("memo", "smpcwallet.com", "Memo")
 	accept = flag.String("accept", "AGREE", "AGREE|DISAGREE")
 	key = flag.String("key", "", "Accept key")
-	keyType = flag.String("keytype", "ECDSA", "ECDSA|ED25519")
-	pubkey = flag.String("pubkey", "", "Dcrm pubkey")
+	keyType = flag.String("keytype", "EC256K1", "EC256K1|ED25519")
+	pubkey = flag.String("pubkey", "", "Smpc pubkey")
+	inputcode = flag.String("inputcode", "", "bip32 input code")
 	//msghash = flag.String("msghash", "", "msghash=Keccak256(unsignTX)")
 	pkey := flag.String("pkey", "", "Private key")
 	enode = flag.String("enode", "", "enode")
@@ -169,7 +254,7 @@ func init() {
 
 	// To account
 	toAccDef := accounts.Account{
-		Address: common.HexToAddress(DCRM_TO_ADDR),
+		Address: common.HexToAddress(SmpcToAddr),
 	}
 	fmt.Println("To address: = ", toAccDef.Address.String())
 	var err error
@@ -179,14 +264,30 @@ func init() {
 		keyjson, err = ioutil.ReadFile(*keyfile)
 		if err != nil {
 			fmt.Println("Read keystore fail", err)
+			panic(err)
 		}
 	} else {
 		keyjson = []byte(KEYFILE)
 	}
 	keyWrapper, err = keystore.DecryptKey(keyjson, *passwd)
 	if err != nil {
-		fmt.Println("Key decrypt error:")
-		panic(err)
+		if *passwdfile != "" {
+			pass, err := ioutil.ReadFile(*passwdfile)
+			if err != nil {
+				fmt.Println("Read passwd file fail", err)
+				fmt.Println("Key decrypt error:")
+				panic(err)
+			} else {
+				keyWrapper, err = keystore.DecryptKey(keyjson, string(pass))
+				if err != nil {
+					fmt.Println("Key decrypt error:")
+					panic(err)
+				}
+			}
+		} else {
+			fmt.Println("Key decrypt error:")
+			panic(err)
+		}
 	}
 	if *pkey != "" {
 		priKey, err := crypto.HexToECDSA(*pkey)
@@ -198,14 +299,16 @@ func init() {
 
 	fmt.Printf("Recover from address = %s\n", keyWrapper.Address.String())
 	// set signer and chain id
-	chainID := big.NewInt(CHAIN_ID)
+	chainID := big.NewInt(CHID)
 	signer = types.NewEIP155Signer(chainID)
 	// init RPC client
 	client = ethrpc.New(*url)
 }
 
+// enodeSig get enode sign data, Format is "//EnodeSig = pubkey@IP:PORT" + hex.EncodeToString(crypto.Sign(crypto.Keccak256(pubkey), privateKey))
+// pubkey is the enodeId
 func enodeSig() {
-	enodeRep, err := client.Call("dcrm_getEnode")
+	enodeRep, err := client.Call("smpc_getEnode")
 	if err != nil {
 		panic(err)
 	}
@@ -227,9 +330,10 @@ func enodeSig() {
 	if err != nil {
 		panic(err)
 	}
-	fmt.Printf("\nenodeSig self = \n%s\n\n", enodeJSON.Enode+common.ToHex(sig))
+	fmt.Printf("\nenodeSig self = \n%s\n\n", enodeJSON.Enode+ToHex(sig))
 }
 
+// setGroup set group info
 func setGroup() {
 	var enodeList []string
 	// get enodes from enodesSig by arg -sig
@@ -245,7 +349,7 @@ func setGroup() {
 		enodeList = make([]string, len(nodes))
 		for i := 0; i < len(nodes); i++ {
 			client := ethrpc.New(nodes[i])
-			enodeRep, err := client.Call("dcrm_getEnode")
+			enodeRep, err := client.Call("smpc_getEnode")
 			if err != nil {
 				panic(err)
 			}
@@ -259,11 +363,11 @@ func setGroup() {
 		}
 	}
 	// get gid by send createGroup
-	groupRep, err := client.Call("dcrm_createGroup", *ts, enodeList)
+	groupRep, err := client.Call("smpc_createGroup", *ts, enodeList)
 	if err != nil {
 		panic(err)
 	}
-	fmt.Printf("dcrm_createGroup = %s\n", groupRep)
+	fmt.Printf("smpc_createGroup = %s\n", groupRep)
 	var groupJSON groupInfo
 	groupData, _ := getJSONData(groupRep)
 	if err := json.Unmarshal(groupData, &groupJSON); err != nil {
@@ -271,15 +375,17 @@ func setGroup() {
 	}
 	fmt.Printf("\nGid = %s\n\n", groupJSON.Gid)
 }
-func reqDcrmAddr() {
+
+// reqSmpcAddr  Execute generate pubkey 
+func reqSmpcAddr() {
 	// get nonce
-	reqAddrNonce, err := client.Call("dcrm_getReqAddrNonce", keyWrapper.Address.String())
+	reqAddrNonce, err := client.Call("smpc_getReqAddrNonce", keyWrapper.Address.String())
 	if err != nil {
 		panic(err)
 	}
 	nonceStr, _ := getJSONResult(reqAddrNonce)
 	nonce, _ := strconv.ParseUint(nonceStr, 0, 64)
-	fmt.Printf("dcrm_getReqAddrNonce = %s\nNonce = %d\n", reqAddrNonce, nonce)
+	fmt.Printf("smpc_getReqAddrNonce = %s\nNonce = %d\n", reqAddrNonce, nonce)
 	// build Sigs list parameter
 	sigs := ""
 	if *mode == "0" {
@@ -292,21 +398,30 @@ func reqDcrmAddr() {
 	timestamp := strconv.FormatInt((time.Now().UnixNano() / 1e6), 10)
 	txdata := reqAddrData{
 		TxType:    *cmd,
+		Keytype:   *keyType,
 		GroupID:   *gid,
 		ThresHold: *ts,
 		Mode:      *mode,
+		AcceptTimeOut: "600",
 		TimeStamp: timestamp,
 		Sigs:      sigs,
 	}
 	playload, _ := json.Marshal(txdata)
 
+	fmt.Println("--------------------------")
+	fmt.Println(txdata)
+	fmt.Println("--------------------------")
 	// sign tx
 	rawTX, err := signTX(signer, keyWrapper.PrivateKey, nonce, playload)
 	if err != nil {
 		panic(err)
 	}
+	//print raw tx
+
+	fmt.Println(rawTX)
+	fmt.Println("-------------------------------------")
 	// send rawTx
-	reqKeyID, err := client.Call("dcrm_reqDcrmAddr", rawTX)
+	reqKeyID, err := client.Call("smpc_reqSmpcAddr", rawTX)
 	if err != nil {
 		panic(err)
 	}
@@ -315,12 +430,12 @@ func reqDcrmAddr() {
 	if err != nil {
 		panic(err)
 	}
-	fmt.Printf("\ndcrm_reqDcrmAddr keyID = %s\n\n", keyID)
+	fmt.Printf("\nsmpc_reqSmpcAddr keyID = %s\n\n", keyID)
 
 	fmt.Printf("\nWaiting for stats result...\n")
 	// get accounts
 	time.Sleep(time.Duration(20) * time.Second)
-	accounts, err := client.Call("dcrm_getAccounts", keyWrapper.Address.String(), *mode)
+	accounts, err := client.Call("smpc_getAccounts", keyWrapper.Address.String(), *mode)
 	if err != nil {
 		panic(err)
 	}
@@ -328,38 +443,39 @@ func reqDcrmAddr() {
 
 	// traverse key from reqAddr failed by keyID
 	time.Sleep(time.Duration(2) * time.Second)
-	fmt.Printf("\nreqDCRMAddr:User=%s", keyWrapper.Address.String())
+	fmt.Printf("\nreqSMPCAddr:User=%s", keyWrapper.Address.String())
 	var statusJSON reqAddrStatus
-	reqStatus, err := client.Call("dcrm_getReqAddrStatus", keyID)
+	reqStatus, err := client.Call("smpc_getReqAddrStatus", keyID)
 	if err != nil {
-		fmt.Println("\tdcrm_getReqAddrStatus rpc error:", err)
+		fmt.Println("\tsmpc_getReqAddrStatus rpc error:", err)
 		return
 	}
 	statusJSONStr, err := getJSONResult(reqStatus)
 	if err != nil {
-		fmt.Printf("\tdcrm_getReqAddrStatus=NotStart\tkeyID=%s ", keyID)
+		fmt.Printf("\tsmpc_getReqAddrStatus=NotStart\tkeyID=%s ", keyID)
 		fmt.Println("\tRequest not complete:", err)
 		return
 	}
 	if err := json.Unmarshal([]byte(statusJSONStr), &statusJSON); err != nil {
-		fmt.Println("\treqDCRMAddr:User=%s\tUnmarshal statusJSONStr fail:", err)
+		fmt.Println("\treqSMPCAddr:User=%s\tUnmarshal statusJSONStr fail:", err)
 		return
 	}
 	if statusJSON.Status != "Success" {
-		fmt.Printf("\tdcrm_getReqAddrStatus=%s\tkeyID=%s", statusJSON.Status, keyID)
+		fmt.Printf("\tsmpc_getReqAddrStatus=%s\tkeyID=%s", statusJSON.Status, keyID)
 	} else {
 		fmt.Printf("\tSuccess\tPubkey=%s\n", statusJSON.PubKey)
 	}
 }
 
+// acceptReqAddr  Agree to generate pubkey 
 func acceptReqAddr() {
 	// get reqAddr account list
-	reqListRep, err := client.Call("dcrm_getCurNodeReqAddrInfo", keyWrapper.Address.String())
+	reqListRep, err := client.Call("smpc_getCurNodeReqAddrInfo", keyWrapper.Address.String())
 	if err != nil {
 		panic(err)
 	}
 	reqListJSON, _ := getJSONData(reqListRep)
-	fmt.Printf("dcrm_getCurNodeReqAddrInfo = %s\n", reqListJSON)
+	fmt.Printf("smpc_getCurNodeReqAddrInfo = %s\n", reqListJSON)
 
 	var keyList []reqAddrCurNodeInfo
 	if err := json.Unmarshal(reqListJSON, &keyList); err != nil {
@@ -388,6 +504,7 @@ func acceptReqAddr() {
 		playload, err := json.Marshal(data)
 		if err != nil {
 			fmt.Println("error:", err)
+			panic(err)
 		}
 		// sign tx
 		rawTX, err := signTX(signer, keyWrapper.PrivateKey, 0, playload)
@@ -395,7 +512,7 @@ func acceptReqAddr() {
 			panic(err)
 		}
 		// send rawTx
-		acceptReqAddrRep, err := client.Call("dcrm_acceptReqAddr", rawTX)
+		acceptReqAddrRep, err := client.Call("smpc_acceptReqAddr", rawTX)
 		if err != nil {
 			panic(err)
 		}
@@ -404,13 +521,13 @@ func acceptReqAddr() {
 		if err != nil {
 			panic(err)
 		}
-		fmt.Printf("\ndcrm_acceptReq result: key[%d]\t%s = %s\n\n", i+1, keyStr, acceptRet)
+		fmt.Printf("\nsmpc_acceptReq result: key[%d]\t%s = %s\n\n", i+1, keyStr, acceptRet)
 	}
 }
 
 func lockOut() {
 	// get lockout nonce
-	lockoutNonce, err := client.Call("dcrm_getLockOutNonce", keyWrapper.Address.String())
+	lockoutNonce, err := client.Call("smpc_getLockOutNonce", keyWrapper.Address.String())
 	if err != nil {
 		panic(err)
 	}
@@ -419,13 +536,13 @@ func lockOut() {
 		panic(err)
 	}
 	nonce, _ := strconv.ParseUint(nonceStr, 0, 64)
-	fmt.Printf("dcrm_getLockOutNonce = %s\nNonce = %d\n", lockoutNonce, nonce)
+	fmt.Printf("smpc_getLockOutNonce = %s\nNonce = %d\n", lockoutNonce, nonce)
 	// build tx data
 	timestamp := strconv.FormatInt((time.Now().UnixNano() / 1e6), 10)
 	txdata := lockoutData{
 		TxType:    *cmd,
-		DcrmAddr:  *fromAddr,
-		DcrmTo:    *toAddr,
+		SmpcAddr:  *fromAddr,
+		SmpcTo:    *toAddr,
 		Value:     *value,
 		Cointype:  *coin,
 		GroupID:   *gid,
@@ -441,7 +558,7 @@ func lockOut() {
 		panic(err)
 	}
 	// send rawTx
-	reqKeyID, err := client.Call("dcrm_lockOut", rawTX)
+	reqKeyID, err := client.Call("smpc_lockOut", rawTX)
 	if err != nil {
 		panic(err)
 	}
@@ -450,20 +567,20 @@ func lockOut() {
 	if err != nil {
 		panic(err)
 	}
-	fmt.Printf("\ndcrm_lockOut keyID = %s\n\n", keyID)
+	fmt.Printf("\nsmpc_lockOut keyID = %s\n\n", keyID)
 	fmt.Printf("\nWaiting for stats result...\n")
 	// traverse key from reqAddr failed by keyID
 	time.Sleep(time.Duration(30) * time.Second)
 	fmt.Printf("\n\nUser=%s\n", keyWrapper.Address.String())
 	var statusJSON lockoutStatus
-	reqStatus, err := client.Call("dcrm_getLockOutStatus", keyID)
+	reqStatus, err := client.Call("smpc_getLockOutStatus", keyID)
 	if err != nil {
-		fmt.Println("\ndcrm_getLockOutStatus rpc error:", err)
+		fmt.Println("\nsmpc_getLockOutStatus rpc error:", err)
 		return
 	}
 	statusJSONStr, err := getJSONResult(reqStatus)
 	if err != nil {
-		fmt.Printf("\tdcrm_getLockOutStatus=NotStart\tkeyID=%s ", keyID)
+		fmt.Printf("\tsmpc_getLockOutStatus=NotStart\tkeyID=%s ", keyID)
 		fmt.Println("\tRequest not complete:", err)
 		return
 	}
@@ -472,19 +589,19 @@ func lockOut() {
 		return
 	}
 	if statusJSON.Status != "Success" {
-		fmt.Printf("\tdcrm_getLockOutStatus=%s\tkeyID=%s  ", statusJSON.Status, keyID)
+		fmt.Printf("\tsmpc_getLockOutStatus=%s\tkeyID=%s  ", statusJSON.Status, keyID)
 	} else {
 		fmt.Printf("\tSuccess\tOutTXhash=%s", statusJSON.OutTxHash)
 	}
 }
 func acceptLockOut() {
 	// get approve list of condominium account
-	reqListRep, err := client.Call("dcrm_getCurNodeLockOutInfo", keyWrapper.Address.String())
+	reqListRep, err := client.Call("smpc_getCurNodeLockOutInfo", keyWrapper.Address.String())
 	if err != nil {
 		panic(err)
 	}
 	reqListJSON, _ := getJSONData(reqListRep)
-	fmt.Printf("dcrm_getCurNodeLockOutInfo = %s\n", reqListJSON)
+	fmt.Printf("smpc_getCurNodeLockOutInfo = %s\n", reqListJSON)
 
 	var keyList []lockoutCurNodeInfo
 	if err := json.Unmarshal(reqListJSON, &keyList); err != nil {
@@ -511,6 +628,7 @@ func acceptLockOut() {
 		playload, err := json.Marshal(data)
 		if err != nil {
 			fmt.Println("error:", err)
+			panic(err)
 		}
 		// sign tx
 		rawTX, err := signTX(signer, keyWrapper.PrivateKey, 0, playload)
@@ -518,42 +636,46 @@ func acceptLockOut() {
 			panic(err)
 		}
 		// send rawTx
-		acceptLockOutRep, err := client.Call("dcrm_acceptLockOut", rawTX)
+		acceptLockOutRep, err := client.Call("smpc_acceptLockOut", rawTX)
 		if err != nil {
 			panic(err)
 		}
-		fmt.Printf("\ndcrm_acceptLockOut = %s\n\n", acceptLockOutRep)
+		fmt.Printf("\nsmpc_acceptLockOut = %s\n\n", acceptLockOutRep)
 		// get result
 		acceptRet, err := getJSONResult(acceptLockOutRep)
 		if err != nil {
 			panic(err)
 		}
-		fmt.Printf("\ndcrm_acceptLockOut result: key[%d]\t%s = %s\n\n", i+1, keyStr, acceptRet)
+		fmt.Printf("\nsmpc_acceptLockOut result: key[%d]\t%s = %s\n\n", i+1, keyStr, acceptRet)
 	}
 }
+
+// sign Execute MPC sign 
 func sign() {
 	//if *msghash == "" {
-	//	*msghash = common.ToHex(crypto.Keccak256([]byte(*memo)))
+	//	*msghash = ToHex(crypto.Keccak256([]byte(*memo)))
 	//}
 	if len(hashs) == 0 {
-	    hashs = append(hashs,common.ToHex(crypto.Keccak256([]byte(*memo))))
+		hashs = append(hashs, ToHex(crypto.Keccak256([]byte(*memo))))
 	}
 
 	if len(contexts) == 0 {
-	    contexts = append(contexts,*memo)
+		contexts = append(contexts, *memo)
 	}
 
-	signMsgHash(hashs,contexts, -1)
+	signMsgHash(hashs, contexts, -1)
 }
+
+//  preGenSignData Generate relevant data required for distributed sign in advance 
 func preGenSignData() {
 	if len(subgids) == 0 {
-	    panic(fmt.Errorf("error:sub group id array is empty"))
+		panic(fmt.Errorf("error:sub group id array is empty"))
 	}
 
 	txdata := preSignData{
-		TxType:     "PRESIGNDATA",
-		PubKey:     *pubkey,
-		SubGid:    subgids,
+		TxType: "PRESIGNDATA",
+		PubKey: *pubkey,
+		SubGid: subgids,
 	}
 	playload, _ := json.Marshal(txdata)
 	// sign tx
@@ -562,53 +684,350 @@ func preGenSignData() {
 		panic(err)
 	}
 	// get rawTx
-	_, err = client.Call("dcrm_preGenSignData", rawTX)
+	_, err = client.Call("smpc_preGenSignData", rawTX)
 	if err != nil {
 		panic(err)
 	}
 }
-func signMsgHash(hashs []string, contexts []string,loopCount int) (rsv []string) {
-	// get sign nonce
-	signNonce, err := client.Call("dcrm_getSignNonce", keyWrapper.Address.String())
+
+//------------------------------------------------------------------
+
+// DefaultDataDir default data dir
+func DefaultDataDir(datadir string) string {
+	if datadir != "" {
+		return datadir
+	}
+	// Try to place the data folder in the user's home dir
+	home := homeDir()
+	if home != "" {
+		if runtime.GOOS == "darwin" {
+			return filepath.Join(home, "Library", "smpc-walletservice")
+		} else if runtime.GOOS == "windows" {
+			return filepath.Join(home, "AppData", "Roaming", "smpc-walletservice")
+		} else {
+			return filepath.Join(home, ".smpc-walletservice")
+		}
+	}
+	// As we cannot guess a stable location, return empty and handle later
+	return ""
+}
+
+// homeDir get home path
+func homeDir() string {
+	if home := os.Getenv("HOME"); home != "" {
+		return home
+	}
+	if usr, err := user.Current(); err == nil {
+		return usr.HomeDir
+	}
+	return ""
+}
+
+// GetPreDbDir Obtain the database path to store the relevant data required by the distributed sign 
+func GetPreDbDir(eid string, datadir string) string {
+	dir := DefaultDataDir(datadir)
+	dir += "/smpcdata/smpcpredb" + eid
+
+	return dir
+}
+
+// PrePubData pre-sign data
+type PrePubData struct {
+	Key    string
+	K1     *big.Int
+	R      *big.Int
+	Ry     *big.Int
+	Sigma1 *big.Int
+	Gid    string
+	Used   bool //useless? TODO
+}
+
+// PreSignDataValue pre-sign data set
+type PreSignDataValue struct {
+	Data []*PrePubData
+}
+
+// Decode decode string by data type
+func Decode(s string, datatype string) (interface{}, error) {
+
+	if datatype == "PreSignDataValue" {
+		var m PreSignDataValue
+		err := json.Unmarshal([]byte(s), &m)
+		if err != nil {
+			return nil, err
+		}
+
+		return &m, nil
+	}
+
+	return nil, fmt.Errorf("decode obj fail")
+}
+
+// DecodePreSignDataValue decode PreSignDataValue
+func DecodePreSignDataValue(s string) (*PreSignDataValue, error) {
+	if s == "" {
+		return nil, fmt.Errorf("presign data error")
+	}
+
+	ret, err := Decode(s, "PreSignDataValue")
 	if err != nil {
+		return nil, err
+	}
+
+	return ret.(*PreSignDataValue), nil
+}
+
+// MPCHash type define
+type MPCHash [32]byte
+
+// Hex hash to hex string
+func (h MPCHash) Hex() string { return hexutil.Encode(h[:]) }
+
+// Keccak256Hash calculates and returns the Keccak256 hash of the input data,
+// converting it to an internal Hash data structure.
+func Keccak256Hash(data ...[]byte) (h MPCHash) {
+	d := sha3.NewKeccak256()
+	for _, b := range data {
+		_, err := d.Write(b)
+		if err != nil {
+			return h
+		}
+	}
+	d.Sum(h[:0])
+	return h
+}
+
+// delPreSignData Delete the relevant data required by the distributed sign through pubkey and group ID  
+func delPreSignData() {
+	enodeRep, err := client.Call("smpc_getEnode")
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("getEnode = %s\n\n", enodeRep)
+	var enodeJSON dataEnode
+	enodeData, _ := getJSONData(enodeRep)
+	if err := json.Unmarshal(enodeData, &enodeJSON); err != nil {
+		panic(err)
+	}
+	fmt.Printf("enode = %s\n", enodeJSON.Enode)
+	// get pubkey from enode
+	if *enode != "" {
+		enodeJSON.Enode = *enode
+	}
+	s := strings.Split(enodeJSON.Enode, "@")
+	enodePubkey := strings.Split(s[0], "//")
+	fmt.Printf("enodePubkey = %s\n", enodePubkey[1])
+
+	if *pubkey == "" || *gid == "" {
+		log.Fatal("Please provide pubkey,group id")
+	}
+
+	dir := GetPreDbDir(enodePubkey[1], *datadir)
+	fmt.Printf("==========================delPreSignData,dir = %v ================================\n", dir)
+	predbtmp, err := ethdb.NewLDBDatabase(dir, 76, 512)
+	if err != nil {
+		predb = nil
+		if predb == nil {
+			fmt.Printf("==========================delPreSignData,open db fail,dir = %v,pubkey = %v,gid = %v,cur_enode = %v ================================\n", dir, *pubkey, *gid, enodePubkey[1])
+			os.Exit(1)
+			return
+		}
+	} else {
+		predb = predbtmp
+	}
+
+	if predb == nil {
+		fmt.Printf("==========================delPreSignData,open db fail,dir = %v,pubkey = %v,gid = %v,cur_enode = %v ================================\n", dir, *pubkey, *gid, enodePubkey[1])
+		os.Exit(1)
+		return
+	}
+
+	fmt.Printf("================================delPreSignData,pubkey = %v,gid = %v ======================\n", *pubkey, *gid)
+
+	pub := strings.ToLower(Keccak256Hash([]byte(strings.ToLower(*pubkey + ":" + *gid))).Hex())
+	iter := predb.NewIterator()
+	for iter.Next() {
+		key := string(iter.Key())
+
+		fmt.Printf("================================delPreSignData, key = %v,pub = %v ======================\n", key, pub)
+		if strings.EqualFold(pub, key) {
+			err = predb.Delete([]byte(key))
+			if err != nil {
+				fmt.Printf("==========================delPreSignData, delete presign data fail,dir = %v,pubkey = %v,gid = %v,cur_enode = %v,err = %v======================\n", dir, *pubkey, *gid, enodePubkey[1], err)
+			} else {
+				fmt.Printf("============================delPreSignData, delete presign data success,dir = %v,pubkey = %v,gid = %v,cur_enode = %v===================\n", dir, *pubkey, *gid, enodePubkey[1])
+			}
+
+			break
+		}
+	}
+
+	iter.Release()
+}
+
+// getPreSignData get the relevant data required by the distributed sign through pubkey and group ID  
+func getPreSignData() {
+	enodeRep, err := client.Call("smpc_getEnode")
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("getEnode = %s\n\n", enodeRep)
+	var enodeJSON dataEnode
+	enodeData, _ := getJSONData(enodeRep)
+	if err := json.Unmarshal(enodeData, &enodeJSON); err != nil {
+		panic(err)
+	}
+	fmt.Printf("enode = %s\n", enodeJSON.Enode)
+	// get pubkey from enode
+	if *enode != "" {
+		enodeJSON.Enode = *enode
+	}
+	s := strings.Split(enodeJSON.Enode, "@")
+	enodePubkey := strings.Split(s[0], "//")
+	fmt.Printf("enodePubkey = %s\n", enodePubkey[1])
+
+	if *pubkey == "" || *gid == "" {
+		log.Fatal("Please provide pubkey,group id")
+	}
+
+	dir := GetPreDbDir(enodePubkey[1], *datadir)
+	fmt.Printf("==========================getPreSignData,dir = %v ================================\n", dir)
+	predbtmp, err := ethdb.NewLDBDatabase(dir, 76, 512)
+	if err != nil {
+		predb = nil
+		if predb == nil {
+			fmt.Printf("==========================getPreSignData,open db fail,dir = %v,pubkey = %v,gid = %v,cur_enode = %v ================================\n", dir, *pubkey, *gid, enodePubkey[1])
+			os.Exit(1)
+			return
+		}
+	} else {
+		predb = predbtmp
+	}
+
+	fmt.Printf("================================getPreSignData,pubkey = %v,gid = %v ======================\n", *pubkey, *gid)
+
+	pub := strings.ToLower(Keccak256Hash([]byte(strings.ToLower(*pubkey + ":" + *gid))).Hex())
+	iter := predb.NewIterator()
+	for iter.Next() {
+		key := string(iter.Key())
+		value := string(iter.Value())
+
+		fmt.Printf("================================getPreSignData, key = %v,pub = %v ======================\n", key, pub)
+		if strings.EqualFold(pub, key) {
+			ps, err := DecodePreSignDataValue(value)
+			if err != nil {
+				fmt.Printf("============================getPreSignData,decode pre-sign data value error,err = %v===========================\n")
+				break
+			}
+
+			fmt.Printf("==================================getPreSignData,decode pre-sign data value success, data count = %v==========================\n", len(ps.Data))
+
+			for _, v := range ps.Data {
+				fmt.Printf("===================================getPreSignData,pub = %v, pre-sign data key = %v==========================\n", key, v.Key)
+			}
+
+			break
+		}
+	}
+
+	iter.Release()
+}
+
+//----------------------------------------------------------------------------
+
+// PrintSignResultToLocalFile print sign result to log file
+func PrintSignResultToLocalFile() {
+	var file string
+	if logfilepath == nil {
+		file = "./" + "SignResult" + ".txt" //  ./SignResult.txt
+	} else {
+		file = *logfilepath
+	}
+
+	logFile, err := os.OpenFile(file, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0766)
+	if err != nil {
+		return
+	}
+	log.SetOutput(logFile) // 将文件设置为log输出的文件
+	//log.SetPrefix("[Sign]")
+	//log.SetFlags(log.LstdFlags | log.Lshortfile | log.LUTC)
+	return
+}
+
+// PrintTime print time
+func PrintTime(t time.Time, key string, status string, loopcount int) {
+	d := time.Since(t)
+	str := "-------------------------------------------------------\n"
+	str += "key = "
+	str += key
+	str += ",  "
+	str += "status = "
+	str += status
+	str += ",  "
+	str += "retry count(get every 5 seconds) = "
+	str += strconv.Itoa(loopcount)
+	str += ",  "
+	str += "time spent = "
+	s := common.PrettyDuration(d).String()
+	//str += strconv.FormatFloat(d.Seconds(), 'E', -1, 64)
+	str += s
+	str += "\n"
+	log.Println(str)
+}
+
+// signMsgHash sign
+func signMsgHash(hashs []string, contexts []string, loopCount int) (rsv []string) {
+	timevalue := time.Now()
+
+	// get sign nonce
+	signNonce, err := client.Call("smpc_getSignNonce", keyWrapper.Address.String())
+	if err != nil {
+		PrintTime(timevalue, "", "Error", 0)
 		panic(err)
 	}
 	nonceStr, err := getJSONResult(signNonce)
 	if err != nil {
+		PrintTime(timevalue, "", "Error", 0)
 		panic(err)
 	}
 	nonce, _ := strconv.ParseUint(nonceStr, 0, 64)
-	fmt.Printf("dcrm_getSignNonce = %s\nNonce = %d\n", signNonce, nonce)
+	fmt.Printf("smpc_getSignNonce = %s\nNonce = %d\n", signNonce, nonce)
 	// build tx data
 	timestamp := strconv.FormatInt((time.Now().UnixNano() / 1e6), 10)
 	txdata := signData{
 		TxType:     "SIGN",
 		PubKey:     *pubkey,
+		InputCode:  *inputcode,
 		MsgContext: contexts,
 		MsgHash:    hashs,
 		Keytype:    *keyType,
 		GroupID:    *gid,
 		ThresHold:  *ts,
 		Mode:       *mode,
+		AcceptTimeOut: "600",
 		TimeStamp:  timestamp,
 	}
 	playload, _ := json.Marshal(txdata)
 	// sign tx
 	rawTX, err := signTX(signer, keyWrapper.PrivateKey, nonce, playload)
 	if err != nil {
+		PrintTime(timevalue, "", "Error", 0)
 		panic(err)
 	}
 	// get rawTx
-	reqKeyID, err := client.Call("dcrm_sign", rawTX)
+	reqKeyID, err := client.Call("smpc_sign", rawTX)
 	if err != nil {
-		panic(err)
+		PrintTime(timevalue, "", "Error", 0)
+		//panic(err)
+		return
 	}
 	// get keyID
 	keyID, err := getJSONResult(reqKeyID)
 	if err != nil {
+		PrintTime(timevalue, "", "Error", 0)
 		panic(err)
 	}
-	fmt.Printf("\ndcrm_sign keyID = %s\n\n", keyID)
+	fmt.Printf("\nsmpc_sign keyID = %s\n\n", keyID)
 	for i, j := loopCount, 1; i != 0; j++ {
 		fmt.Printf("\nWaiting for stats result (loop %v)...\n", j)
 		if i > 0 {
@@ -618,14 +1037,14 @@ func signMsgHash(hashs []string, contexts []string,loopCount int) (rsv []string)
 		time.Sleep(time.Duration(20) * time.Second)
 		fmt.Printf("\n\nUser=%s", keyWrapper.Address.String())
 		var statusJSON signStatus
-		reqStatus, err := client.Call("dcrm_getSignStatus", keyID)
+		reqStatus, err := client.Call("smpc_getSignStatus", keyID)
 		if err != nil {
-			fmt.Println("\ndcrm_getSignStatus rpc error:", err)
+			fmt.Println("\nsmpc_getSignStatus rpc error:", err)
 			continue
 		}
 		statusJSONStr, err := getJSONResult(reqStatus)
 		if err != nil {
-			fmt.Printf("\tdcrm_getSignStatus=NotStart\tkeyID=%s ", keyID)
+			fmt.Printf("\tsmpc_getSignStatus=NotStart\tkeyID=%s ", keyID)
 			fmt.Println("\tRequest not complete:", err)
 			continue
 		}
@@ -635,26 +1054,30 @@ func signMsgHash(hashs []string, contexts []string,loopCount int) (rsv []string)
 		}
 		switch statusJSON.Status {
 		case "Timeout", "Failure":
-			fmt.Printf("\tdcrm_getSignStatus=%s\tkeyID=%s\n", statusJSON.Status, keyID)
+			PrintTime(timevalue, keyID, statusJSON.Status, j)
+			fmt.Printf("\tsmpc_getSignStatus=%s\tkeyID=%s\n", statusJSON.Status, keyID)
 			return
 		case "Success":
+			PrintTime(timevalue, keyID, "Success", j)
 			fmt.Printf("\tSuccess\tRSV=%s\n", statusJSON.Rsv)
 			return statusJSON.Rsv
 		default:
-			fmt.Printf("\tdcrm_getSignStatus=%s\tkeyID=%s\n", statusJSON.Status, keyID)
+			fmt.Printf("\tsmpc_getSignStatus=%s\tkeyID=%s\n", statusJSON.Status, keyID)
 			continue
 		}
 	}
 	return
 }
+
+// acceptSign accept sign
 func acceptSign() {
 	// get approve list of condominium account
-	reqListRep, err := client.Call("dcrm_getCurNodeSignInfo", keyWrapper.Address.String())
+	reqListRep, err := client.Call("smpc_getCurNodeSignInfo", keyWrapper.Address.String())
 	if err != nil {
 		panic(err)
 	}
 	reqListJSON, _ := getJSONData(reqListRep)
-	fmt.Printf("dcrm_getCurNodeSignInfo = %s\n", reqListJSON)
+	fmt.Printf("smpc_getCurNodeSignInfo = %s\n", reqListJSON)
 
 	var keyList []signCurNodeInfo
 	if err := json.Unmarshal(reqListJSON, &keyList); err != nil {
@@ -667,13 +1090,13 @@ func acceptSign() {
 		var keyStr string
 		var msgHash []string
 		var msgContext []string
-		
+
 		if len(hashs) == 0 {
-		    hashs = append(hashs,common.ToHex(crypto.Keccak256([]byte(*memo))))
+			hashs = append(hashs, ToHex(crypto.Keccak256([]byte(*memo))))
 		}
 
 		if len(contexts) == 0 {
-		    contexts = append(contexts,*memo)
+			contexts = append(contexts, *memo)
 		}
 
 		if *key != "" {
@@ -698,6 +1121,7 @@ func acceptSign() {
 		playload, err := json.Marshal(data)
 		if err != nil {
 			fmt.Println("error:", err)
+			panic(err)
 		}
 		// sign tx
 		rawTX, err := signTX(signer, keyWrapper.PrivateKey, 0, playload)
@@ -705,7 +1129,7 @@ func acceptSign() {
 			panic(err)
 		}
 		// send rawTx
-		acceptSignRep, err := client.Call("dcrm_acceptSign", rawTX)
+		acceptSignRep, err := client.Call("smpc_acceptSign", rawTX)
 		if err != nil {
 			panic(err)
 		}
@@ -714,9 +1138,11 @@ func acceptSign() {
 		if err != nil {
 			panic(err)
 		}
-		fmt.Printf("\ndcrm_acceptSign result: key[%d]\t%s = %s\n\n", i+1, keyStr, acceptRet)
+		fmt.Printf("\nsmpc_acceptSign result: key[%d]\t%s = %s\n\n", i+1, keyStr, acceptRet)
 	}
 }
+
+// reshare  Execute Reshare 
 func reshare() {
 	// build tx data
 	sigs := ""
@@ -734,17 +1160,22 @@ func reshare() {
 		ThresHold: *ts,
 		Account:   keyWrapper.Address.String(),
 		Mode:      *mode,
+		AcceptTimeOut: "600",
 		Sigs:      sigs,
 		TimeStamp: timestamp,
 	}
-	playload, _ := json.Marshal(txdata)
+	playload, err := json.Marshal(txdata)
+	if err != nil {
+		panic(err)
+	}
+
 	// sign tx
 	rawTX, err := signTX(signer, keyWrapper.PrivateKey, 0, playload)
 	if err != nil {
 		panic(err)
 	}
 	// send rawTx
-	reqKeyID, err := client.Call("dcrm_reShare", rawTX)
+	reqKeyID, err := client.Call("smpc_reShare", rawTX)
 	if err != nil {
 		panic(err)
 	}
@@ -753,16 +1184,18 @@ func reshare() {
 	if err != nil {
 		panic(err)
 	}
-	fmt.Printf("\ndcrm_reShare keyID = %s\n\n", keyID)
+	fmt.Printf("\nsmpc_reShare keyID = %s\n\n", keyID)
 }
+
+// acceptReshare accept reshare
 func acceptReshare() {
 	// get account reshare approve list
-	reqListRep, err := client.Call("dcrm_getCurNodeReShareInfo")
+	reqListRep, err := client.Call("smpc_getCurNodeReShareInfo")
 	if err != nil {
 		panic(err)
 	}
 	reqListJSON, _ := getJSONData(reqListRep)
-	fmt.Printf("dcrm_getCurNodeReShareInfo = %s\n", reqListJSON)
+	fmt.Printf("smpc_getCurNodeReShareInfo = %s\n", reqListJSON)
 
 	var keyList []reshareCurNodeInfo
 	if err := json.Unmarshal(reqListJSON, &keyList); err != nil {
@@ -789,6 +1222,7 @@ func acceptReshare() {
 		playload, err := json.Marshal(data)
 		if err != nil {
 			fmt.Println("error:", err)
+			panic(err)
 		}
 		// sign tx
 		rawTX, err := signTX(signer, keyWrapper.PrivateKey, 0, playload)
@@ -796,7 +1230,7 @@ func acceptReshare() {
 			panic(err)
 		}
 		// send rawTx
-		acceptSignRep, err := client.Call("dcrm_acceptReShare", rawTX)
+		acceptSignRep, err := client.Call("smpc_acceptReShare", rawTX)
 		if err != nil {
 			panic(err)
 		}
@@ -805,70 +1239,72 @@ func acceptReshare() {
 		if err != nil {
 			panic(err)
 		}
-		fmt.Printf("\ndcrm_acceptReShare result: key[%d]\t%s = %s\n\n", i+1, keyStr, acceptRet)
+		fmt.Printf("\nsmpc_acceptReShare result: key[%d]\t%s = %s\n\n", i+1, keyStr, acceptRet)
 	}
 }
 
-func getDcrmAddr() error {
-    if pubkey == nil {
-	return fmt.Errorf("pubkey error")
-    }
+/*// getSmpcAddr get smpc addr by pubkey
+func getSmpcAddr() error {
+	if pubkey == nil {
+		return fmt.Errorf("pubkey error")
+	}
 
-    pub := (*pubkey)
+	pub := (*pubkey)
 
-    if pub == "" || (*coin) == "" {
-	return fmt.Errorf("pubkey error.")
-    }
+	if pub == "" || (*coin) == "" {
+		return fmt.Errorf("pubkey error")
+	}
 
-    if (*coin) != "FSN" && (*coin) != "BTC" { //only btc/fsn tmp
-	return fmt.Errorf("coin type unsupported.")
-    }
+	if (*coin) != "FSN" && (*coin) != "BTC" { //only btc/fsn tmp
+		return fmt.Errorf("coin type unsupported")
+	}
 
-    if len(pub) != 132 && len(pub) != 130 {
-	    return fmt.Errorf("invalid public key length")
-    }
-    if pub[:2] == "0x" || pub[:2] == "0X" {
-	    pub = pub[2:]
-    }
+	if len(pub) != 132 && len(pub) != 130 {
+		return fmt.Errorf("invalid public key length")
+	}
+	if pub[:2] == "0x" || pub[:2] == "0X" {
+		pub = pub[2:]
+	}
 
-    if (*coin) == "FSN" {
-	pubKeyHex := strings.TrimPrefix(pub, "0x")
-	data := hexEncPubkey(pubKeyHex[2:])
+	if (*coin) == "FSN" {
+		pubKeyHex := strings.TrimPrefix(pub, "0x")
+		data := hexEncPubkey(pubKeyHex[2:])
 
-	pub2, err := decodePubkey(data)
+		pub2, err := decodePubkey(data)
+		if err != nil {
+			return err
+		}
+
+		address := crypto.PubkeyToAddress(*pub2).Hex()
+		fmt.Printf("\ngetSmpcAddr result: %s\n\n", address)
+		return nil
+	}
+
+	bb, err := hex.DecodeString(pub)
 	if err != nil {
-	    return err
+		return err
+	}
+	pub2, err := btcec.ParsePubKey(bb, btcec.S256())
+	if err != nil {
+		return err
 	}
 
-	address := crypto.PubkeyToAddress(*pub2).Hex()
-	fmt.Printf("\ngetDcrmAddr result: %s\n\n", address)
-	return nil
-    }
-    
-    bb, err := hex.DecodeString(pub)
-    if err != nil {
-	    return err
-    }
-    pub2, err := btcec.ParsePubKey(bb, btcec.S256())
-    if err != nil {
-	    return err
-    }
-    
-    ChainConfig := chaincfg.MainNetParams
-    if (*netcfg) == "testnet" {
-	ChainConfig = chaincfg.TestNet3Params
-    }
+	ChainConfig := chaincfg.MainNetParams
+	if (*netcfg) == "testnet" {
+		ChainConfig = chaincfg.TestNet3Params
+	}
 
-    b := pub2.SerializeCompressed()
-    pkHash := btcutil.Hash160(b)
-    addressPubKeyHash, err := btcutil.NewAddressPubKeyHash(pkHash, &ChainConfig)
-    if err != nil {
-	    return err
-    }
-    address := addressPubKeyHash.EncodeAddress()
-    fmt.Printf("\ngetDcrmAddr result: %s\n\n", address)
-    return nil
+	b := pub2.SerializeCompressed()
+	pkHash := btcutil.Hash160(b)
+	addressPubKeyHash, err := btcutil.NewAddressPubKeyHash(pkHash, &ChainConfig)
+	if err != nil {
+		return err
+	}
+	address := addressPubKeyHash.EncodeAddress()
+	fmt.Printf("\ngetSmpcAddr result: %s\n\n", address)
+	return nil
 }
+*/
 
 func hexEncPubkey(h string) (ret [64]byte) {
 	b, err := hex.DecodeString(h)
@@ -897,7 +1333,7 @@ func decodePubkey(e [64]byte) (*ecdsa.PublicKey, error) {
 	return p, nil
 }
 
-// parse result from rpc return data
+// getJSONResult parse result from rpc return data
 func getJSONResult(successResponse json.RawMessage) (string, error) {
 	var data dataResult
 	repData, err := getJSONData(successResponse)
@@ -928,10 +1364,10 @@ func getJSONData(successResponse json.RawMessage) ([]byte, error) {
 	return repData, nil
 }
 
-// return: raw hex
+// signTX build tx with sign
 func signTX(signer types.EIP155Signer, privatekey *ecdsa.PrivateKey, nonce uint64, playload []byte) (string, error) {
 	toAccDef := accounts.Account{
-		Address: common.HexToAddress(DCRM_TO_ADDR),
+		Address: common.HexToAddress(SmpcToAddr),
 	}
 	// build tx
 	tx := types.NewTransaction(
@@ -944,21 +1380,25 @@ func signTX(signer types.EIP155Signer, privatekey *ecdsa.PrivateKey, nonce uint6
 	// sign tx by privatekey
 	signature, signatureErr := crypto.Sign(signer.Hash(tx).Bytes(), privatekey)
 	if signatureErr != nil {
-		fmt.Println("signature create error:")
+		fmt.Println("signature create error")
 		panic(signatureErr)
 	}
 	// build tx with sign
 	sigTx, signErr := tx.WithSignature(signer, signature)
 	if signErr != nil {
-		fmt.Println("signer with signature error:")
+		fmt.Println("signer with signature error")
 		panic(signErr)
 	}
+	fmt.Println("--------------------------------------------------")
+	fmt.Println("sigtx before raw is: ")
+	fmt.Println(sigTx)
+	fmt.Println("--------------------------------------------------")
 	// get raw TX
 	txdata, txerr := rlp.EncodeToBytes(sigTx)
 	if txerr != nil {
 		panic(txerr)
 	}
-	rawTX := common.ToHex(txdata)
+	rawTX := ToHex(txdata)
 	fmt.Printf("\nSignTx:\nChainId\t\t=%s\nGas\t\t=%d\nGasPrice\t=%s\nNonce\t\t=%d\nToAddr\t\t=%s\nHash\t\t=%s\nData\t\t=%s\n",
 		sigTx.ChainId(), sigTx.Gas(), sigTx.GasPrice(), sigTx.Nonce(), sigTx.To().String(), sigTx.Hash().Hex(), sigTx.Data())
 	fmt.Printf("RawTransaction = %+v\n", rawTX)
@@ -985,9 +1425,11 @@ type groupInfo struct {
 }
 type reqAddrData struct {
 	TxType    string `json:"TxType"`
+	Keytype   string `json:"Keytype"`
 	GroupID   string `json:"GroupId"`
 	ThresHold string `json:"ThresHold"`
 	Mode      string `json:"Mode"`
+	AcceptTimeOut  string `json:"AcceptTimeOut"` //unit: second
 	TimeStamp string `json:"TimeStamp"`
 	Sigs      string `json:"Sigs"`
 }
@@ -1007,8 +1449,8 @@ type acceptSignData struct {
 }
 type lockoutData struct {
 	TxType    string `json:"TxType"`
-	DcrmAddr  string `json:"DcrmAddr"`
-	DcrmTo    string `json:"DcrmTo"`
+	SmpcAddr  string `json:"SmpcAddr"`
+	SmpcTo    string `json:"SmpcTo"`
 	Value     string `json:"Value"`
 	Cointype  string `json:"Cointype"`
 	GroupID   string `json:"GroupId"`
@@ -1018,20 +1460,22 @@ type lockoutData struct {
 	Memo      string `json:"Memo"`
 }
 type signData struct {
-	TxType     string `json:"TxType"`
-	PubKey     string `json:"PubKey"`
+	TxType     string   `json:"TxType"`
+	PubKey     string   `json:"PubKey"`
+	InputCode  string   `json:"InputCode"`
 	MsgContext []string `json:"MsgContext"`
 	MsgHash    []string `json:"MsgHash"`
-	Keytype    string `json:"Keytype"`
-	GroupID    string `json:"GroupId"`
-	ThresHold  string `json:"ThresHold"`
-	Mode       string `json:"Mode"`
-	TimeStamp  string `json:"TimeStamp"`
+	Keytype    string   `json:"Keytype"`
+	GroupID    string   `json:"GroupId"`
+	ThresHold  string   `json:"ThresHold"`
+	Mode       string   `json:"Mode"`
+	AcceptTimeOut  string `json:"AcceptTimeOut"` //unit: second
+	TimeStamp  string   `json:"TimeStamp"`
 }
 type preSignData struct {
-    TxType string `json:"TxType"`
-    PubKey string `json:"PubKey"`
-    SubGid []string `json:"SubGid"`
+	TxType string   `json:"TxType"`
+	PubKey string   `json:"PubKey"`
+	SubGid []string `json:"SubGid"`
 }
 type reshareData struct {
 	TxType    string `json:"TxType"`
@@ -1041,6 +1485,7 @@ type reshareData struct {
 	ThresHold string `json:"ThresHold"`
 	Account   string `json:"Account"`
 	Mode      string `json:"Mode"`
+	AcceptTimeOut  string `json:"AcceptTimeOut"` //unit: second
 	Sigs      string `json:"Sigs"`
 	TimeStamp string `json:"TimeStamp"`
 }
@@ -1062,7 +1507,7 @@ type lockoutStatus struct {
 }
 type signStatus struct {
 	Status    string      `json:"Status"`
-	Rsv       []string      `json:"Rsv"`
+	Rsv       []string    `json:"Rsv"`
 	Tip       string      `json:"Tip"`
 	Error     string      `json:"Error"`
 	AllReply  interface{} `json:"AllReply"`
@@ -1084,25 +1529,25 @@ type lockoutCurNodeInfo struct {
 	Key       string `json:"Key"`
 	Nonce     string `json:"Nonce"`
 	Mode      string `json:"Mode"`
-	DcrmFrom  string `json:"DcrmFrom"`
-	DcrmTo    string `json:"DcrmTo"`
+	SmpcFrom  string `json:"SmpcFrom"`
+	SmpcTo    string `json:"SmpcTo"`
 	Value     string `json:"Value"`
 	CoinType  string `json:"CoinType"`
 	ThresHold string `json:"ThresHold"`
 	TimeStamp string `json:"TimeStamp"`
 }
 type signCurNodeInfo struct {
-	Account    string `json:"Account"`
-	GroupID    string `json:"GroupId"`
-	Key        string `json:"Key"`
-	KeyType    string `json:"KeyType"`
-	Mode       string `json:"Mode"`
+	Account    string   `json:"Account"`
+	GroupID    string   `json:"GroupId"`
+	Key        string   `json:"Key"`
+	KeyType    string   `json:"KeyType"`
+	Mode       string   `json:"Mode"`
 	MsgContext []string `json:"MsgContext"`
 	MsgHash    []string `json:"MsgHash"`
-	Nonce      string `json:"Nonce"`
-	PubKey     string `json:"PubKey"`
-	ThresHold  string `json:"ThresHold"`
-	TimeStamp  string `json:"TimeStamp"`
+	Nonce      string   `json:"Nonce"`
+	PubKey     string   `json:"PubKey"`
+	ThresHold  string   `json:"ThresHold"`
+	TimeStamp  string   `json:"TimeStamp"`
 }
 type reshareCurNodeInfo struct {
 	Key       string `json:"Key"`
